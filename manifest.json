@@ -1,0 +1,27 @@
+{
+  "schemaVersion": 1,
+  "id": "azure.fabric-capacity",
+  "name": "Fabric Capacity",
+  "version": "2.0.0",
+  "author": "edward",
+  "description": "Pause/resume one or more Azure Microsoft Fabric capacities from the bar. The icon reflects combined live state (active/paused/transitioning) and flags an expired az login.",
+  "kinds": ["bar-widget"],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "Fabric Capacity",
+    "description": "Left-click to see every configured capacity's state, resize it, and pause/resume it. Right-click to add/remove capacities by resource ID. Uses the az CLI's cached login; flags and offers to fix an expired login.",
+    "category": "Cloud",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "refreshIntervalSec": 60,
+      "busyRefreshIntervalSec": 10
+    },
+    "schema": [
+      { "key": "refreshIntervalSec", "type": "integer", "label": "Refresh interval (seconds)", "min": 15, "max": 3600, "step": 15, "defaultValue": 60 },
+      { "key": "busyRefreshIntervalSec", "type": "integer", "label": "Refresh interval while pausing/resuming (seconds)", "min": 5, "max": 60, "step": 5, "defaultValue": 10 }
+    ]
+  }
+}
