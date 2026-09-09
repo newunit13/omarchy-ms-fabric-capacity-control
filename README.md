@@ -8,6 +8,8 @@ it, or pause/resume it. Right-click to add or remove capacities by Azure
 resource ID. The bar icon reflects the combined state across all configured
 capacities (active/paused/transitioning) and flags an expired `az` login.
 
+![Fabric Capacity panel showing two paused capacities](assets/screenshot.png)
+
 ## Requirements
 
 - [Omarchy](https://omarchy.org) with its Quickshell-based bar/plugin system
