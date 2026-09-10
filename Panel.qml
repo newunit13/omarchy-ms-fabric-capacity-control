@@ -290,6 +290,18 @@ Panel {
     configOpened = !configOpened
   }
 
+  // KeyboardPanel's outside-click/Escape dismissal calls `owner.close()`.
+  // Pointing both popups' `owner` straight at `root` made the config
+  // popup's dismissal call root.close() (the *main* panel's open/close,
+  // via PanelController) instead of closeConfig() — so clicking away from
+  // the settings popup silently did nothing to it while still eating the
+  // click meant for whatever window was underneath, making it feel like a
+  // stuck full-screen modal. Give the config popup its own owner so its
+  // dismissal actually targets configOpened.
+  readonly property QtObject configPanelOwner: QtObject {
+    function close() { root.closeConfig() }
+  }
+
   onConfigOpenedChanged: if (configOpened) {
     idsArea.text = root.capacityIds.join("\n")
     refreshField.field.value = root.refreshIntervalSec
@@ -300,12 +312,19 @@ Panel {
   KeyboardPanel {
     id: configPanel
     anchorItem: button
-    owner: root
+    owner: root.configPanelOwner
     bar: root.bar
     open: root.configOpened
     focusTarget: configKeyCatcher
     contentWidth: configPanel.fittedContentWidth(Style.space(360))
-    contentHeight: configPanel.fittedContentHeight(configColumn.implicitHeight, Style.space(360))
+    // No height cap here (unlike contentWidth's 360 above): this content
+    // isn't wrapped in a Flickable like the main panel's is, and reusing
+    // that same 360 figure as a height cap left it well short of what the
+    // title/textarea/polling fields/button row actually need, so the card
+    // background rendered shorter than the (unclipped) content and the
+    // Save/Cancel row spilled out below it. fittedContentHeight still
+    // bounds this to the screen's available height on its own.
+    contentHeight: configPanel.fittedContentHeight(configColumn.implicitHeight)
 
     PanelKeyCatcher {
       id: configKeyCatcher
@@ -318,7 +337,6 @@ Panel {
         anchors.left: parent.left
         anchors.right: parent.right
         anchors.top: parent.top
-        anchors.margins: Style.space(4)
         spacing: Style.space(10)
 
         Text {
@@ -394,28 +412,40 @@ Panel {
           fontFamily: root.fontFamily
         }
 
-        Row {
-          spacing: Style.space(8)
-          anchors.right: parent.right
+        // Positioners like Column don't support anchoring a direct child
+        // (it silently falls out of the stacking flow and doesn't count
+        // toward implicitHeight), which was leaving this row rendered
+        // below the card's computed height entirely — the background
+        // never reached it. Wrap it in a plain Item sized by the Column
+        // instead, and anchor the Row to *that*.
+        Item {
+          width: configColumn.width
+          height: buttonRow.implicitHeight
 
-          Button {
-            text: "Cancel"
-            bordered: true
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            verticalPadding: Style.spacing.controlPaddingY
-            onClicked: root.closeConfig()
-          }
+          Row {
+            id: buttonRow
+            anchors.right: parent.right
+            spacing: Style.space(8)
 
-          Button {
-            text: "Save"
-            selected: true
-            foreground: root.foreground
-            fontFamily: root.fontFamily
-            verticalPadding: Style.spacing.controlPaddingY
-            onClicked: {
-              root.saveCapacityIds(idsArea.text, refreshField.field.value, busyField.field.value)
-              root.closeConfig()
+            Button {
+              text: "Cancel"
+              bordered: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              verticalPadding: Style.spacing.controlPaddingY
+              onClicked: root.closeConfig()
+            }
+
+            Button {
+              text: "Save"
+              selected: true
+              foreground: root.foreground
+              fontFamily: root.fontFamily
+              verticalPadding: Style.spacing.controlPaddingY
+              onClicked: {
+                root.saveCapacityIds(idsArea.text, refreshField.field.value, busyField.field.value)
+                root.closeConfig()
+              }
             }
           }
         }
