@@ -64,12 +64,12 @@ Panel {
 
   readonly property var capacityIds: computeCapacityIds(root.settings)
 
-  function saveCapacityIds(text, refreshSec, busySec) {
-    var lines = String(text || "").split("\n")
+  function saveCapacityIds(ids, refreshSec, busySec) {
+    var list = ids && typeof ids.length === "number" ? ids : []
     var seen = ({})
     var out = []
-    for (var i = 0; i < lines.length; i++) {
-      var id = lines[i].trim()
+    for (var i = 0; i < list.length; i++) {
+      var id = String(list[i] || "").trim()
       if (id === "" || seen[id]) continue
       seen[id] = true
       out.push(id)
@@ -302,11 +302,139 @@ Panel {
     function close() { root.closeConfig() }
   }
 
+  // ----------------------------------------------------- capacity discovery
+  //
+  // Lets the config popup offer a checklist of every Fabric capacity the
+  // cached `az login` can see, instead of requiring the user to copy each
+  // resource ID out of the portal by hand. `capacityOptions` merges three
+  // sources into one deduped-by-id list: capacities already saved (so they
+  // never disappear from the list just because discovery hasn't run yet, or
+  // can't see them), ones typed into "Add manually" this session, and
+  // whatever the last discovery run found — in that priority order, so a
+  // manually-typed ID that discovery later confirms picks up its real
+  // resource-group label.
+  property var selectedCapacityIds: []
+  property var manualCapacities: []
+  property var discoveredCapacities: []   // [{value, label, description}]
+  property bool discovering: false
+  property string discoverError: ""
+
+  function lastPathSegment(id) {
+    var parts = String(id || "").split("/")
+    return parts.length > 0 ? parts[parts.length - 1] : String(id || "")
+  }
+
+  // Mirrors CapacityService's own looksLikeAuthFailure — kept local rather
+  // than shared since it's a handful of lines and the two components are
+  // otherwise independent (one process per configured capacity vs. this
+  // one-off discovery call).
+  function looksLikeAuthFailure(text) {
+    var t = String(text || "").toLowerCase()
+    return t.indexOf("az login") >= 0
+      || t.indexOf("refresh token") >= 0
+      || t.indexOf("interactive authentication is needed") >= 0
+      || t.indexOf("aadsts700082") >= 0
+      || t.indexOf("aadsts70008") >= 0
+  }
+
+  readonly property var capacityOptions: {
+    var byId = ({})
+    function note(id, description) {
+      var v = String(id || "").trim()
+      if (v === "") return
+      if (!byId[v]) byId[v] = { value: v, label: root.lastPathSegment(v), description: description || "" }
+      else if (description) byId[v].description = description
+    }
+    for (var i = 0; i < root.capacityIds.length; i++) note(root.capacityIds[i], "")
+    for (var k = 0; k < root.manualCapacities.length; k++) note(root.manualCapacities[k], "Added manually")
+    for (var j = 0; j < root.discoveredCapacities.length; j++) note(root.discoveredCapacities[j].value, root.discoveredCapacities[j].description)
+    var out = []
+    for (var id in byId) out.push(byId[id])
+    out.sort(function(a, b) { return a.label < b.label ? -1 : (a.label > b.label ? 1 : 0) })
+    return out
+  }
+
+  readonly property string discoverStatusText: {
+    if (root.discovering) return "Searching your Azure subscriptions…"
+    if (root.discoverError !== "") return root.discoverError
+    if (root.discoveredCapacities.length > 0) {
+      return "Found " + root.discoveredCapacities.length
+        + (root.discoveredCapacities.length === 1 ? " capacity." : " capacities.")
+    }
+    return "Not discovered yet — click Discover, or add one manually below."
+  }
+
+  function discoverCapacities() {
+    if (discoverProcess.running) return
+    discoverError = ""
+    discovering = true
+    discoverProcess.running = true
+  }
+
+  function addManualCapacity(text) {
+    var id = String(text || "").trim()
+    if (id === "") return
+    if (manualCapacities.indexOf(id) === -1) manualCapacities = manualCapacities.concat([id])
+    if (selectedCapacityIds.indexOf(id) === -1) selectedCapacityIds = selectedCapacityIds.concat([id])
+    manualIdField.text = ""
+  }
+
+  property string _discoverStderr: ""
+
+  // Loops `az resource list` over every subscription the cached login can
+  // see. TSV output (not JSON) so results from successive subscriptions can
+  // just be concatenated line-by-line — chaining `az resource list` calls'
+  // JSON array output together wouldn't parse as one document. `pipefail`
+  // makes an expired-login failure in `az account list` (which would
+  // otherwise leave the `while read` loop silently iterating zero lines and
+  // exiting 0) surface as the pipeline's exit code instead.
+  Process {
+    id: discoverProcess
+    command: ["bash", "-lc",
+      "set -o pipefail; az account list --query \"[].id\" -o tsv | while IFS= read -r sub; do az resource list --subscription \"$sub\" --resource-type Microsoft.Fabric/capacities --query \"[].[id,resourceGroup]\" -o tsv 2>/dev/null; done"]
+
+    stdout: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: {
+        var lines = String(text || "").split("\n")
+        var found = []
+        for (var i = 0; i < lines.length; i++) {
+          var line = lines[i].replace(/\r$/, "")
+          if (line.trim() === "") continue
+          var parts = line.split("\t")
+          var id = (parts[0] || "").trim()
+          var rg = (parts[1] || "").trim()
+          if (id === "") continue
+          found.push({ value: id, label: root.lastPathSegment(id), description: rg !== "" ? "Resource group: " + rg : "" })
+        }
+        root.discoveredCapacities = found
+      }
+    }
+
+    stderr: StdioCollector {
+      waitForEnd: true
+      onStreamFinished: root._discoverStderr = String(text || "").trim()
+    }
+
+    onExited: function(exitCode) {
+      root.discovering = false
+      if (exitCode !== 0) {
+        root.discoverError = root.looksLikeAuthFailure(root._discoverStderr)
+          ? "Azure sign-in expired. Run az login, then try Discover again."
+          : (root._discoverStderr !== "" ? root._discoverStderr : "Discovery failed (exit " + exitCode + ")")
+      } else if (root.discoveredCapacities.length === 0) {
+        root.discoverError = "No Fabric capacities found across your subscriptions."
+      } else {
+        root.discoverError = ""
+      }
+      root._discoverStderr = ""
+    }
+  }
+
   onConfigOpenedChanged: if (configOpened) {
-    idsArea.text = root.capacityIds.join("\n")
+    selectedCapacityIds = root.capacityIds.slice()
     refreshField.field.value = root.refreshIntervalSec
     busyField.field.value = root.busyRefreshIntervalSec
-    Qt.callLater(function() { idsArea.forceActiveFocus() })
   }
 
   KeyboardPanel {
@@ -349,35 +477,80 @@ Panel {
 
         Text {
           width: parent.width
-          text: "One Azure resource ID per line."
+          text: "Discover capacities from your az login, check the ones to show, or add one manually."
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
           wrapMode: Text.WordWrap
         }
 
-        ScrollView {
-          id: idsScroll
-          width: parent.width
-          height: Style.space(150)
-          clip: true
+        RowLayout {
+          width: configColumn.width
+          spacing: Style.space(8)
 
-          TextArea {
-            id: idsArea
-            width: idsScroll.width
-            wrapMode: TextEdit.NoWrap
+          Button {
+            id: discoverButton
+            Layout.alignment: Qt.AlignVCenter
+            enabled: !root.discovering
+            text: root.discovering ? "Discovering…" : "Discover capacities"
+            iconText: "󰑐"
+            iconSpinning: root.discovering
+            bordered: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            verticalPadding: Style.spacing.controlPaddingY
+            onClicked: root.discoverCapacities()
+          }
+
+          Text {
+            Layout.fillWidth: true
+            Layout.alignment: Qt.AlignVCenter
+            text: root.discoverStatusText
+            color: root.dim
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.caption
+            wrapMode: Text.WordWrap
+          }
+        }
+
+        MultiSelect {
+          id: capacitySelect
+          width: configColumn.width
+          showLabel: false
+          values: root.selectedCapacityIds
+          options: root.capacityOptions
+          triggerLabel: "Select capacities"
+          noSelectionText: "No capacities selected"
+          placeholderText: "Search capacities…"
+          emptyText: root.discovering ? "Searching…" : "No capacities yet — Discover or add one manually"
+          foreground: root.foreground
+          fontFamily: root.fontFamily
+          onChanged: function(vals) { root.selectedCapacityIds = vals }
+        }
+
+        RowLayout {
+          width: configColumn.width
+          spacing: Style.space(8)
+
+          TextField {
+            id: manualIdField
+            Layout.fillWidth: true
+            Layout.alignment: Qt.AlignVCenter
+            placeholderText: "Or paste a resource ID to add manually"
+            foreground: root.foreground
             font.family: root.fontFamily
             font.pixelSize: Style.font.body
-            color: root.foreground
-            selectionColor: Style.selectionFillFor(root.foreground, Color.accent)
-            placeholderText: "/subscriptions/<sub>/resourceGroups/<rg>/providers/Microsoft.Fabric/capacities/<name>"
-            placeholderTextColor: Qt.darker(root.foreground, 1.6)
+            Keys.onReturnPressed: root.addManualCapacity(manualIdField.text)
+          }
 
-            background: BorderSurface {
-              color: Style.controlFill(idsArea.activeFocus, false, root.foreground, Color.accent)
-              borderSpec: Border.controlSpec(idsArea.activeFocus ? "focus" : "normal", root.foreground, Color.accent)
-              radius: Style.cornerRadius
-            }
+          Button {
+            text: "Add"
+            Layout.alignment: Qt.AlignVCenter
+            bordered: true
+            foreground: root.foreground
+            fontFamily: root.fontFamily
+            verticalPadding: Style.spacing.controlPaddingY
+            onClicked: root.addManualCapacity(manualIdField.text)
           }
         }
 
@@ -443,7 +616,7 @@ Panel {
               fontFamily: root.fontFamily
               verticalPadding: Style.spacing.controlPaddingY
               onClicked: {
-                root.saveCapacityIds(idsArea.text, refreshField.field.value, busyField.field.value)
+                root.saveCapacityIds(root.selectedCapacityIds, refreshField.field.value, busyField.field.value)
                 root.closeConfig()
               }
             }

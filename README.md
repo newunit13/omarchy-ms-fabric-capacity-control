@@ -38,7 +38,12 @@ omarchy plugin update fabric-capacity
 
 Right-click the bar icon to open the config panel:
 
-- Paste one Azure resource ID per line, e.g.:
+- **Discover capacities** — loops the cached `az login` over every
+  subscription you can see and lists every Fabric capacity it finds. Check
+  the ones you want in the left-click panel.
+- Capacities discovery can't reach (a different tenant, a scoped-down
+  role, ...) can be added by pasting their resource ID into the manual-add
+  field, e.g.:
   ```
   /subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Fabric/capacities/<capacity-name>
   ```
