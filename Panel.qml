@@ -311,9 +311,11 @@ Panel {
   // *array order* is the display order saved to settings.capacities (and
   // so the order CapacityRow instances render in on the left-click panel),
   // and each entry's `enabled` flag is whether it's checked. `source`
-  // ("saved" | "discovered" | "manual") only matters for the remove button
-  // below, which is offered for "manual" rows since those are the only
-  // ones with no other way to drop off the list short of a save cycle.
+  // ("saved" | "discovered" | "manual") drives the remove button below,
+  // which is offered for anything discovery hasn't (yet) vouched for in
+  // this session — "manual" rows, but also "saved" ones, since reopening
+  // the popup reseeds every saved row as "saved" regardless of how it
+  // originally got there (see onConfigOpenedChanged).
   property var capacityRows: []   // [{ id, label, description, enabled, source }]
   property bool discovering: false
   property string discoverError: ""
@@ -605,25 +607,35 @@ Panel {
 
         // Capped-height scroll area so a long capacity list can't push the
         // Polling section and Save/Cancel row off screen; short lists just
-        // shrink to fit instead of leaving dead scroll space.
-        ScrollView {
-          id: capacityScroll
+        // shrink to fit instead of leaving dead scroll space. A plain
+        // ScrollView left this unscrollable in practice — with no
+        // Flickable-derived content and no explicit contentHeight of its
+        // own, it had nothing to tell it the list was taller than the
+        // capped viewport, so rows past the cap just went unreachable
+        // instead of becoming scrollable. Mirrors the main panel's own
+        // Flickable further up this file: explicit contentWidth/
+        // contentHeight instead of relying on implicit content sizing.
+        Flickable {
+          id: capacityFlick
           visible: root.capacityRows.length > 0
           width: configColumn.width
-          height: Math.min(rowsArea.height, Style.space(230))
+          height: Math.min(rowsColumn.implicitHeight, Style.space(230))
+          contentWidth: width
+          contentHeight: rowsColumn.implicitHeight
           clip: true
+          boundsBehavior: Flickable.StopAtBounds
+          interactive: contentHeight > height
+          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
-          // The ghost below has to be a plain Item's child, not the
-          // Column's: Column would fight its explicit `y` binding the same
-          // way it fought the Save/Cancel row's anchors earlier in this
-          // file — a positioner claims every direct child's position, full
-          // stop, whatever else that child sets.
-          Item {
-            id: rowsArea
-            width: capacityScroll.width
-            height: rowsColumn.implicitHeight
-
-            Column {
+          // The ghost below has to be a sibling of the Column, not a
+          // child of it: Column would fight its explicit `y` binding the
+          // same way it fought the Save/Cancel row's anchors earlier in
+          // this file — a positioner claims every direct child's
+          // position, full stop, whatever else that child sets. A
+          // Flickable doesn't reposition its children that way (it moves
+          // the whole content via one transform), so it's a safe parent
+          // for both.
+          Column {
               id: rowsColumn
               width: parent.width
               spacing: Style.space(4)
@@ -723,7 +735,15 @@ Panel {
 
                     PanelActionButton {
                       Layout.alignment: Qt.AlignVCenter
-                      visible: rowItem.modelData.source === "manual"
+                      // Not just source === "manual": reopening the popup
+                      // reseeds every saved row with source "saved" (see
+                      // onConfigOpenedChanged), so a manually-added entry
+                      // loses that tag the moment it's saved — which used
+                      // to mean losing the only way to get rid of it again
+                      // short of a save-while-unchecked round trip. Offer
+                      // it for anything discovery hasn't (yet) vouched for
+                      // instead.
+                      visible: rowItem.modelData.source !== "discovered"
                       iconText: "󰅙"
                       tooltipText: "Remove"
                       foreground: root.foreground
@@ -744,8 +764,8 @@ Panel {
 
             // Drop-target ghost: a floating copy of the dragged row's
             // label that follows the vertical drag. A sibling of the
-            // Column above, not a child of it — same reasoning as the
-            // comment by rowsArea's declaration.
+            // Column above, not a child of it — see the comment on this
+            // Flickable's declaration.
             Rectangle {
               visible: root.draggingIndex !== -1
               x: 0
@@ -768,7 +788,6 @@ Panel {
                 font.pixelSize: Style.font.body
               }
             }
-          }
         }
 
         Text {
