@@ -323,8 +323,25 @@ Panel {
 
   readonly property real capacityRowHeight: Style.space(44)
   property int draggingIndex: -1
-  property real dragGhostY: 0
   property string dragGhostLabel: ""
+
+  // Drag position is tracked in *viewport* coordinates (relative to
+  // capacityFlick, which doesn't move) rather than content coordinates
+  // (relative to rowsColumn, which scrolls) — dragPointerViewportY is set
+  // on every pointer move, dragPressOffset is the fixed grab-point offset
+  // captured once at press, and dragGhostY is derived from both plus the
+  // *current* contentY. Deriving it instead of setting it imperatively is
+  // what makes auto-scroll work below: nudging contentY on its own is
+  // enough to make the ghost follow, with no separate code path needed to
+  // keep it under a pointer that isn't otherwise moving.
+  property real dragPointerViewportY: 0
+  property real dragPressOffset: 0
+  readonly property real dragGhostY: {
+    if (draggingIndex === -1) return 0
+    var raw = dragPointerViewportY + capacityFlick.contentY - dragPressOffset
+    var maxY = Math.max(0, rowsColumn.height - capacityRowHeight)
+    return Math.max(0, Math.min(maxY, raw))
+  }
 
   function lastPathSegment(id) {
     var parts = String(id || "").split("/")
@@ -627,6 +644,29 @@ Panel {
           interactive: contentHeight > height
           ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
 
+          // Auto-scroll while a drag holds near either edge — without
+          // this a list taller than the viewport (the whole reason it
+          // scrolls at all) couldn't be reordered across the fold, since
+          // there'd be no way to see or reach a drop target that isn't
+          // currently visible. dragGhostY (above) is derived from
+          // contentY, so nudging it here is all that's needed to keep the
+          // ghost following.
+          Timer {
+            id: dragAutoScrollTimer
+            interval: 16
+            repeat: true
+            readonly property real edgeZone: Style.space(28)
+            readonly property real step: Style.space(8)
+            running: root.draggingIndex !== -1 && capacityFlick.interactive
+              && (root.dragPointerViewportY < edgeZone || root.dragPointerViewportY > capacityFlick.height - edgeZone)
+            onTriggered: {
+              var maxContentY = Math.max(0, capacityFlick.contentHeight - capacityFlick.height)
+              capacityFlick.contentY = root.dragPointerViewportY < edgeZone
+                ? Math.max(0, capacityFlick.contentY - step)
+                : Math.min(maxContentY, capacityFlick.contentY + step)
+            }
+          }
+
           // The ghost below has to be a sibling of the Column, not a
           // child of it: Column would fight its explicit `y` binding the
           // same way it fought the Save/Cancel row's anchors earlier in
@@ -682,21 +722,25 @@ Panel {
                         anchors.fill: parent
                         anchors.margins: -Style.space(6)
                         cursorShape: Qt.SizeVerCursor
-                        property real pressY: 0
+                        // Without this, capacityFlick (interactive: true)
+                        // steals the gesture the moment it sees enough
+                        // vertical movement, per Qt's normal
+                        // MouseArea-inside-Flickable behavior — dragging
+                        // the grip scrolled the list instead of moving the
+                        // ghost.
+                        preventStealing: true
 
                         onPressed: function(mouse) {
-                          var p = gripArea.mapToItem(rowsColumn, 0, mouse.y)
-                          pressY = p.y
+                          var vp = gripArea.mapToItem(capacityFlick, 0, mouse.y)
                           root.draggingIndex = rowItem.index
                           root.dragGhostLabel = rowItem.modelData.label
-                          root.dragGhostY = rowItem.y
+                          root.dragPressOffset = (vp.y + capacityFlick.contentY) - rowItem.y
+                          root.dragPointerViewportY = vp.y
                         }
                         onPositionChanged: function(mouse) {
                           if (root.draggingIndex !== rowItem.index) return
-                          var p = gripArea.mapToItem(rowsColumn, 0, mouse.y)
-                          var slot = root.capacityRowHeight + rowsColumn.spacing
-                          var proposed = rowItem.index * slot + (p.y - pressY)
-                          root.dragGhostY = Math.max(0, Math.min(rowsColumn.height - root.capacityRowHeight, proposed))
+                          var vp = gripArea.mapToItem(capacityFlick, 0, mouse.y)
+                          root.dragPointerViewportY = vp.y
                         }
                         onReleased: {
                           if (root.draggingIndex === -1) return
