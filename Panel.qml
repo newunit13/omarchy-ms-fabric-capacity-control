@@ -304,24 +304,98 @@ Panel {
 
   // ----------------------------------------------------- capacity discovery
   //
-  // Lets the config popup offer a checklist of every Fabric capacity the
-  // cached `az login` can see, instead of requiring the user to copy each
-  // resource ID out of the portal by hand. `capacityOptions` merges three
-  // sources into one deduped-by-id list: capacities already saved (so they
-  // never disappear from the list just because discovery hasn't run yet, or
-  // can't see them), ones typed into "Add manually" this session, and
-  // whatever the last discovery run found — in that priority order, so a
-  // manually-typed ID that discovery later confirms picks up its real
-  // resource-group label.
-  property var selectedCapacityIds: []
-  property var manualCapacities: []
-  property var discoveredCapacities: []   // [{value, label, description}]
+  // Lets the config popup offer every Fabric capacity the cached `az login`
+  // can see as one drag-reorderable, toggle-to-enable list, instead of
+  // requiring the user to copy each resource ID out of the portal by hand.
+  // `capacityRows` is the single source of truth for the popup session: its
+  // *array order* is the display order saved to settings.capacities (and
+  // so the order CapacityRow instances render in on the left-click panel),
+  // and each entry's `enabled` flag is whether it's checked. `source`
+  // ("saved" | "discovered" | "manual") only matters for the remove button
+  // below, which is offered for "manual" rows since those are the only
+  // ones with no other way to drop off the list short of a save cycle.
+  property var capacityRows: []   // [{ id, label, description, enabled, source }]
   property bool discovering: false
   property string discoverError: ""
+  property int lastDiscoverCount: -1
+
+  readonly property real capacityRowHeight: Style.space(44)
+  property int draggingIndex: -1
+  property real dragGhostY: 0
+  property string dragGhostLabel: ""
 
   function lastPathSegment(id) {
     var parts = String(id || "").split("/")
     return parts.length > 0 ? parts[parts.length - 1] : String(id || "")
+  }
+
+  function capacityRowIndex(id) {
+    for (var i = 0; i < capacityRows.length; i++) if (capacityRows[i].id === id) return i
+    return -1
+  }
+
+  function setRowEnabled(index, value) {
+    if (index < 0 || index >= capacityRows.length) return
+    var rows = capacityRows.slice()
+    rows[index] = { id: rows[index].id, label: rows[index].label, description: rows[index].description, enabled: value, source: rows[index].source }
+    capacityRows = rows
+  }
+
+  function removeCapacityRow(index) {
+    if (index < 0 || index >= capacityRows.length) return
+    var rows = capacityRows.slice()
+    rows.splice(index, 1)
+    capacityRows = rows
+  }
+
+  function moveCapacityRow(from, to) {
+    if (from === to || from < 0 || to < 0 || from >= capacityRows.length || to >= capacityRows.length) return
+    var rows = capacityRows.slice()
+    var item = rows.splice(from, 1)[0]
+    rows.splice(to, 0, item)
+    capacityRows = rows
+  }
+
+  // capacityRows' own array order *is* the display order — it's what Save
+  // hands to saveCapacityIds, unchanged, so there's nothing else to sort.
+  function enabledCapacityIds() {
+    var ids = []
+    for (var i = 0; i < capacityRows.length; i++) if (capacityRows[i].enabled) ids.push(capacityRows[i].id)
+    return ids
+  }
+
+  function addManualCapacity(text) {
+    var id = String(text || "").trim()
+    if (id === "") return
+    var idx = capacityRowIndex(id)
+    if (idx === -1) {
+      var rows = capacityRows.slice()
+      rows.push({ id: id, label: root.lastPathSegment(id), description: "Added manually", enabled: true, source: "manual" })
+      capacityRows = rows
+    } else {
+      setRowEnabled(idx, true)
+    }
+    manualIdField.text = ""
+  }
+
+  // Merges a discovery run's results into `capacityRows` in place: a
+  // matching id is upgraded (real resource-group description, "discovered"
+  // source — even if it was "manual" before, since Azure now vouches for
+  // it) without disturbing its position or enabled state; a new id is
+  // appended, unchecked, so the user opts it in rather than every
+  // capacity in the tenant silently going live in the left-click panel.
+  function mergeDiscovered(found) {
+    root.lastDiscoverCount = found.length
+    var rows = capacityRows.slice()
+    for (var i = 0; i < found.length; i++) {
+      var idx = capacityRowIndex(found[i].id)
+      if (idx === -1) {
+        rows.push({ id: found[i].id, label: root.lastPathSegment(found[i].id), description: found[i].description, enabled: false, source: "discovered" })
+      } else {
+        rows[idx] = { id: rows[idx].id, label: rows[idx].label, description: found[i].description, enabled: rows[idx].enabled, source: "discovered" }
+      }
+    }
+    capacityRows = rows
   }
 
   // Mirrors CapacityService's own looksLikeAuthFailure — kept local rather
@@ -337,29 +411,12 @@ Panel {
       || t.indexOf("aadsts70008") >= 0
   }
 
-  readonly property var capacityOptions: {
-    var byId = ({})
-    function note(id, description) {
-      var v = String(id || "").trim()
-      if (v === "") return
-      if (!byId[v]) byId[v] = { value: v, label: root.lastPathSegment(v), description: description || "" }
-      else if (description) byId[v].description = description
-    }
-    for (var i = 0; i < root.capacityIds.length; i++) note(root.capacityIds[i], "")
-    for (var k = 0; k < root.manualCapacities.length; k++) note(root.manualCapacities[k], "Added manually")
-    for (var j = 0; j < root.discoveredCapacities.length; j++) note(root.discoveredCapacities[j].value, root.discoveredCapacities[j].description)
-    var out = []
-    for (var id in byId) out.push(byId[id])
-    out.sort(function(a, b) { return a.label < b.label ? -1 : (a.label > b.label ? 1 : 0) })
-    return out
-  }
-
   readonly property string discoverStatusText: {
     if (root.discovering) return "Searching your Azure subscriptions…"
     if (root.discoverError !== "") return root.discoverError
-    if (root.discoveredCapacities.length > 0) {
-      return "Found " + root.discoveredCapacities.length
-        + (root.discoveredCapacities.length === 1 ? " capacity." : " capacities.")
+    if (root.lastDiscoverCount >= 0) {
+      return "Found " + root.lastDiscoverCount
+        + (root.lastDiscoverCount === 1 ? " capacity." : " capacities.")
     }
     return "Not discovered yet — click Discover, or add one manually below."
   }
@@ -371,15 +428,8 @@ Panel {
     discoverProcess.running = true
   }
 
-  function addManualCapacity(text) {
-    var id = String(text || "").trim()
-    if (id === "") return
-    if (manualCapacities.indexOf(id) === -1) manualCapacities = manualCapacities.concat([id])
-    if (selectedCapacityIds.indexOf(id) === -1) selectedCapacityIds = selectedCapacityIds.concat([id])
-    manualIdField.text = ""
-  }
-
   property string _discoverStderr: ""
+  property var _discoverFound: []
 
   // Loops `az resource list` over every subscription the cached login can
   // see. TSV output (not JSON) so results from successive subscriptions can
@@ -405,9 +455,9 @@ Panel {
           var id = (parts[0] || "").trim()
           var rg = (parts[1] || "").trim()
           if (id === "") continue
-          found.push({ value: id, label: root.lastPathSegment(id), description: rg !== "" ? "Resource group: " + rg : "" })
+          found.push({ id: id, description: rg !== "" ? "Resource group: " + rg : "" })
         }
-        root.discoveredCapacities = found
+        root._discoverFound = found
       }
     }
 
@@ -422,17 +472,21 @@ Panel {
         root.discoverError = root.looksLikeAuthFailure(root._discoverStderr)
           ? "Azure sign-in expired. Run az login, then try Discover again."
           : (root._discoverStderr !== "" ? root._discoverStderr : "Discovery failed (exit " + exitCode + ")")
-      } else if (root.discoveredCapacities.length === 0) {
-        root.discoverError = "No Fabric capacities found across your subscriptions."
       } else {
-        root.discoverError = ""
+        root.mergeDiscovered(root._discoverFound)
+        root.discoverError = root._discoverFound.length === 0 ? "No Fabric capacities found across your subscriptions." : ""
       }
       root._discoverStderr = ""
+      root._discoverFound = []
     }
   }
 
   onConfigOpenedChanged: if (configOpened) {
-    selectedCapacityIds = root.capacityIds.slice()
+    var rows = []
+    for (var i = 0; i < root.capacityIds.length; i++) {
+      rows.push({ id: root.capacityIds[i], label: root.lastPathSegment(root.capacityIds[i]), description: "", enabled: true, source: "saved" })
+    }
+    capacityRows = rows
     refreshField.field.value = root.refreshIntervalSec
     busyField.field.value = root.busyRefreshIntervalSec
   }
@@ -477,7 +531,7 @@ Panel {
 
         Text {
           width: parent.width
-          text: "Discover capacities from your az login, check the ones to show, or add one manually."
+          text: "Discover capacities from your az login, drag ⋮⋮ to reorder, and toggle which ones show in the left-click panel."
           color: root.dim
           font.family: root.fontFamily
           font.pixelSize: Style.font.caption
@@ -513,21 +567,6 @@ Panel {
           }
         }
 
-        MultiSelect {
-          id: capacitySelect
-          width: configColumn.width
-          showLabel: false
-          values: root.selectedCapacityIds
-          options: root.capacityOptions
-          triggerLabel: "Select capacities"
-          noSelectionText: "No capacities selected"
-          placeholderText: "Search capacities…"
-          emptyText: root.discovering ? "Searching…" : "No capacities yet — Discover or add one manually"
-          foreground: root.foreground
-          fontFamily: root.fontFamily
-          onChanged: function(vals) { root.selectedCapacityIds = vals }
-        }
-
         RowLayout {
           width: configColumn.width
           spacing: Style.space(8)
@@ -551,6 +590,184 @@ Panel {
             fontFamily: root.fontFamily
             verticalPadding: Style.spacing.controlPaddingY
             onClicked: root.addManualCapacity(manualIdField.text)
+          }
+        }
+
+        Text {
+          width: parent.width
+          visible: root.capacityRows.length === 0
+          text: "No capacities yet — Discover or add one manually above."
+          color: root.dim
+          font.family: root.fontFamily
+          font.pixelSize: Style.font.caption
+          wrapMode: Text.WordWrap
+        }
+
+        // Capped-height scroll area so a long capacity list can't push the
+        // Polling section and Save/Cancel row off screen; short lists just
+        // shrink to fit instead of leaving dead scroll space.
+        ScrollView {
+          id: capacityScroll
+          visible: root.capacityRows.length > 0
+          width: configColumn.width
+          height: Math.min(rowsArea.height, Style.space(230))
+          clip: true
+
+          // The ghost below has to be a plain Item's child, not the
+          // Column's: Column would fight its explicit `y` binding the same
+          // way it fought the Save/Cancel row's anchors earlier in this
+          // file — a positioner claims every direct child's position, full
+          // stop, whatever else that child sets.
+          Item {
+            id: rowsArea
+            width: capacityScroll.width
+            height: rowsColumn.implicitHeight
+
+            Column {
+              id: rowsColumn
+              width: parent.width
+              spacing: Style.space(4)
+
+              Repeater {
+                model: root.capacityRows
+
+                // The dragged row's own position stays Column-managed (see
+                // the MouseArea comment below) — only a floating ghost
+                // tracks the cursor — so there's nothing here to unwind if
+                // a drag is abandoned mid-gesture.
+                delegate: Item {
+                  id: rowItem
+                  required property var modelData
+                  required property int index
+                  width: rowsColumn.width
+                  height: root.capacityRowHeight
+                  opacity: root.draggingIndex === index ? 0.35 : 1.0
+
+                  RowLayout {
+                    anchors.fill: parent
+                    anchors.leftMargin: Style.space(4)
+                    anchors.rightMargin: Style.space(4)
+                    spacing: Style.space(8)
+
+                    Text {
+                      text: "⋮⋮"
+                      color: root.dim
+                      font.family: root.fontFamily
+                      font.pixelSize: Style.font.body
+                      Layout.alignment: Qt.AlignVCenter
+
+                      // `rowItem` is a Column/Repeater-owned child — Column
+                      // sets its y every layout pass, so assigning
+                      // drag.target to it directly would fight that (and
+                      // leave stale offsets once the array reorders out
+                      // from under it, the same trap the bar's own
+                      // module-reorder code documents avoiding). Track the
+                      // raw pointer delta instead and drive a separate
+                      // floating ghost; the real row is only ever touched
+                      // once, on release, via moveCapacityRow.
+                      MouseArea {
+                        id: gripArea
+                        anchors.fill: parent
+                        anchors.margins: -Style.space(6)
+                        cursorShape: Qt.SizeVerCursor
+                        property real pressY: 0
+
+                        onPressed: function(mouse) {
+                          var p = gripArea.mapToItem(rowsColumn, 0, mouse.y)
+                          pressY = p.y
+                          root.draggingIndex = rowItem.index
+                          root.dragGhostLabel = rowItem.modelData.label
+                          root.dragGhostY = rowItem.y
+                        }
+                        onPositionChanged: function(mouse) {
+                          if (root.draggingIndex !== rowItem.index) return
+                          var p = gripArea.mapToItem(rowsColumn, 0, mouse.y)
+                          var slot = root.capacityRowHeight + rowsColumn.spacing
+                          var proposed = rowItem.index * slot + (p.y - pressY)
+                          root.dragGhostY = Math.max(0, Math.min(rowsColumn.height - root.capacityRowHeight, proposed))
+                        }
+                        onReleased: {
+                          if (root.draggingIndex === -1) return
+                          var slot = root.capacityRowHeight + rowsColumn.spacing
+                          var targetIndex = Math.round(root.dragGhostY / slot)
+                          targetIndex = Math.max(0, Math.min(root.capacityRows.length - 1, targetIndex))
+                          root.moveCapacityRow(root.draggingIndex, targetIndex)
+                          root.draggingIndex = -1
+                        }
+                        onCanceled: root.draggingIndex = -1
+                      }
+                    }
+
+                    ColumnLayout {
+                      Layout.fillWidth: true
+                      spacing: 0
+
+                      Text {
+                        Layout.fillWidth: true
+                        text: rowItem.modelData.label
+                        color: root.foreground
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.body
+                        elide: Text.ElideRight
+                      }
+                      Text {
+                        Layout.fillWidth: true
+                        visible: text !== ""
+                        text: rowItem.modelData.description
+                        color: root.dim
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                        elide: Text.ElideRight
+                      }
+                    }
+
+                    PanelActionButton {
+                      Layout.alignment: Qt.AlignVCenter
+                      visible: rowItem.modelData.source === "manual"
+                      iconText: "󰅙"
+                      tooltipText: "Remove"
+                      foreground: root.foreground
+                      fontFamily: root.fontFamily
+                      onClicked: root.removeCapacityRow(rowItem.index)
+                    }
+
+                    ToggleSwitch {
+                      Layout.alignment: Qt.AlignVCenter
+                      checked: rowItem.modelData.enabled
+                      foreground: root.foreground
+                      onToggled: root.setRowEnabled(rowItem.index, !rowItem.modelData.enabled)
+                    }
+                  }
+                }
+              }
+            }
+
+            // Drop-target ghost: a floating copy of the dragged row's
+            // label that follows the vertical drag. A sibling of the
+            // Column above, not a child of it — same reasoning as the
+            // comment by rowsArea's declaration.
+            Rectangle {
+              visible: root.draggingIndex !== -1
+              x: 0
+              y: root.dragGhostY
+              width: rowsColumn.width
+              height: root.capacityRowHeight
+              radius: Style.cornerRadius
+              color: Style.hoverFillFor(root.foreground, Color.accent)
+              border.width: 1
+              border.color: Color.accent
+              z: 100
+
+              Text {
+                anchors.left: parent.left
+                anchors.verticalCenter: parent.verticalCenter
+                anchors.leftMargin: Style.space(10)
+                text: root.dragGhostLabel
+                color: root.foreground
+                font.family: root.fontFamily
+                font.pixelSize: Style.font.body
+              }
+            }
           }
         }
 
@@ -616,7 +833,7 @@ Panel {
               fontFamily: root.fontFamily
               verticalPadding: Style.spacing.controlPaddingY
               onClicked: {
-                root.saveCapacityIds(root.selectedCapacityIds, refreshField.field.value, busyField.field.value)
+                root.saveCapacityIds(root.enabledCapacityIds(), refreshField.field.value, busyField.field.value)
                 root.closeConfig()
               }
             }

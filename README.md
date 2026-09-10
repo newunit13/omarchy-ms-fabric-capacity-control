@@ -39,14 +39,17 @@ omarchy plugin update fabric-capacity
 Right-click the bar icon to open the config panel:
 
 - **Discover capacities** — loops the cached `az login` over every
-  subscription you can see and lists every Fabric capacity it finds. Check
-  the ones you want in the left-click panel.
+  subscription you can see and adds every Fabric capacity it finds to the
+  list below, unchecked. Toggle a capacity on to show it in the left-click
+  panel, and drag the ⋮⋮ handle to set the order it appears there in.
 - Capacities discovery can't reach (a different tenant, a scoped-down
   role, ...) can be added by pasting their resource ID into the manual-add
   field, e.g.:
   ```
   /subscriptions/<subscription-id>/resourceGroups/<resource-group>/providers/Microsoft.Fabric/capacities/<capacity-name>
   ```
+  A manually-added row gets its own remove button, since discovery will
+  never confirm (or re-offer) one on its own.
 - **Refresh interval (seconds)** — default 60, how often to poll capacity
   state
 - **Refresh interval while pausing/resuming (seconds)** — default 10, faster
