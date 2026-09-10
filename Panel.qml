@@ -703,8 +703,17 @@ Panel {
                           var slot = root.capacityRowHeight + rowsColumn.spacing
                           var targetIndex = Math.round(root.dragGhostY / slot)
                           targetIndex = Math.max(0, Math.min(root.capacityRows.length - 1, targetIndex))
-                          root.moveCapacityRow(root.draggingIndex, targetIndex)
+                          var sourceIndex = root.draggingIndex
+                          // Clear draggingIndex (hiding the ghost) *before*
+                          // reordering: moveCapacityRow reassigns
+                          // capacityRows, which is this Repeater's model, so
+                          // it fully recreates every delegate — including
+                          // this very MouseArea's rowItem. Do it after and
+                          // the rest of this handler can end up running on a
+                          // torn-down item, silently dropping the reset and
+                          // leaving the ghost stuck until some later click.
                           root.draggingIndex = -1
+                          root.moveCapacityRow(sourceIndex, targetIndex)
                         }
                         onCanceled: root.draggingIndex = -1
                       }
